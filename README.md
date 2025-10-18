@@ -16,6 +16,10 @@ Model Context Protocol (MCP) server for reading PIDs (Parameter IDs) from cars u
 
 - Python 3.10+
 - ELM327-compatible OBD-II adapter
+    - Recommendation: USB-based, not Bluethooth, as USB tends to be more stable.
+    - This one is good: Vgate vLinker FS OBD2 USB Adapter for Scan HS/MS-CAN Car Switch
+        - Use either this Amazon affilate link (USA): [https://amzn.to/3WP2pAg](https://amzn.to/3WP2pAg), Germany: [https://amzn.to/4hiAjXz](https://amzn.to/4hiAjXz)
+        - Or this ordinary link, if you prefer: [https://www.amazon.de/dp/B094Z7PBLS?ref=ppx_yo2ov_dt_b_fed_asin_title](https://www.amazon.de/dp/B094Z7PBLS?ref=ppx_yo2ov_dt_b_fed_asin_title)
 - Vehicle with OBD-II port (US 1996+, Euro 2001+)
 
 ## Installation
@@ -109,3 +113,41 @@ mcp_obd_ii/
 - `mcp` - Model Context Protocol SDK
 - `pyserial` - Serial port communication
 - `obd` - Python OBD-II library (pyobd fork)
+
+## Development Notes
+
+### Mock Mode
+
+Mock mode allows testing and development without physical OBD-II hardware. It returns fake sensor data for basic PIDs.
+
+**Enable mock mode:**
+```json
+{
+    "mcpServers": {
+        "mcp_obd_ii": {
+            "type": "stdio",
+            "command": "/path/to/your/mcp_obd_ii/.venv/bin/python",
+            "args": ["-m", "mcp_obd_ii"],
+            "env": {
+                "PYTHONPATH": "/path/to/your/mcp_obd_ii/src",
+                "MOCK_OBD": "true"
+            }
+        }
+    }
+}
+```
+
+**What's supported in mock mode:**
+- ✅ Basic PIDs: RPM, SPEED, COOLANT_TEMP, ENGINE_LOAD, THROTTLE_POS, INTAKE_TEMP, MAF, FUEL_LEVEL
+- ✅ Connection management: connect, disconnect, status
+- ❌ DTCs: Not supported (returns error)
+- ❌ Readiness monitors: Not supported
+- ❌ Freeze frames: Not supported
+
+Mock mode activates automatically if the `obd` library is not installed.
+
+**Use cases:**
+- Testing MCP integration without a car
+- CI/CD pipelines
+- Development and debugging
+- Demonstrations
