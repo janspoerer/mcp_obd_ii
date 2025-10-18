@@ -1,7 +1,69 @@
 """
-MCP OBD-II Server Main Entry Point
+MCP OBD-II Server - Vehicle Diagnostics via Model Context Protocol
 
-FastMCP server for OBD-II vehicle diagnostics.
+FastMCP server for OBD-II vehicle diagnostics. Provides read/write access to
+vehicle diagnostic systems including sensor data, trouble codes, and readiness
+monitors.
+
+⚠️ SAFETY & LEGAL WARNINGS ⚠️
+
+SAFE OPERATIONS (Read-Only):
+All PID queries, status checks, and diagnostic reads are completely safe and
+cannot harm the vehicle.
+
+OPERATIONS REQUIRING CAUTION:
+
+Clearing DTCs (Diagnostic Trouble Codes):
+- Permanently erases diagnostic history and freeze frame data
+- Resets readiness monitors (vehicle will fail emission testing)
+- Does NOT fix underlying problems
+- Can hide issues leading to expensive damage ($1,000-8,000+)
+- May constitute fraud if used to pass emission testing
+- May void manufacturer warranty
+
+BEST PRACTICES - DO:
+✓ Read and save DTCs before clearing
+✓ Save freeze frame data for records
+✓ Fix problems before clearing codes
+✓ Use for legitimate diagnostics and repairs
+✓ Keep vehicle stationary during diagnostics
+✓ Ensure adequate ventilation
+
+BEST PRACTICES - DON'T:
+✗ Clear codes to hide problems (fraud)
+✗ Use while driving (distraction/safety risk)
+✗ Attempt to modify ECU settings
+✗ Use write modes in custom PIDs
+✗ Tamper with emission systems
+✗ Violate applicable laws
+
+LEGAL NOTICES:
+
+Emission Tampering (US Federal Crime):
+- Clearing codes to pass testing fraudulently: Up to $3,750/violation
+- Defeating emission monitors or controls: Federal offense
+- Providing tools that automate tampering: Legal liability
+
+Odometer Fraud (Federal Crime):
+- Modifying stored mileage: Up to 3 years imprisonment + $10,000 fine
+
+Warranty:
+- Improper diagnostic tool use may void manufacturer warranty
+
+This tool does NOT enable and explicitly blocks:
+✗ ECU reprogramming/flashing
+✗ VIN modification
+✗ Odometer changes
+✗ Emission system defeats
+✗ Security system bypasses
+
+DISCLAIMER:
+This software is provided "AS IS" without warranty. Users assume all
+responsibility for safe operation, compliance with laws, and any damage
+resulting from use. This is NOT a substitute for professional diagnostic
+equipment or qualified mechanic expertise.
+
+When in doubt, consult a qualified mechanic or vehicle manufacturer documentation.
 """
 
 import logging
