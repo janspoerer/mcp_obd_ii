@@ -68,6 +68,7 @@ When in doubt, consult a qualified mechanic or vehicle manufacturer documentatio
 
 import logging
 from typing import Optional, List
+from difflib import get_close_matches
 from mcp.server.fastmcp import FastMCP
 
 try:
@@ -82,6 +83,7 @@ from mcp_obd_ii.decorators import tool_envelope, connection_required, log_execut
 from mcp_obd_ii.connection_manager import OBDConnectionManager
 from mcp_obd_ii.response_models import OBDResponse, ErrorInfo, Metadata, OBDErrorType
 from mcp_obd_ii import helpers
+from mcp_obd_ii import dtc_tools
 
 
 # Configure logging
@@ -151,12 +153,32 @@ async def obd_connect(
 
     if not success:
         status = manager.get_status()
+        error_msg = status.get('error', 'Connection failed')
+
+        # Analyze error and provide specific suggestions
+        suggestions = []
+
+        if "permission denied" in error_msg.lower():
+            suggestions.append("Permission denied. Add your user to the 'dialout' group: sudo usermod -a -G dialout $USER (then logout/login)")
+            suggestions.append("Or run with sudo (not recommended for production)")
+        elif "no such file" in error_msg.lower() or "device not found" in error_msg.lower():
+            suggestions.append("Device not found. Check available ports: ls /dev/tty* | grep -E '(USB|ACM|rfcomm)'")
+            suggestions.append("For Bluetooth: Ensure adapter is paired AND connected (not just paired)")
+            suggestions.append("Try specifying port manually: obd_connect(port='/dev/ttyUSB0')")
+        elif "timeout" in error_msg.lower():
+            suggestions.append("Connection timeout. Increase timeout: obd_connect(timeout=1.0)")
+            suggestions.append("Check vehicle ignition is ON (not just ACC)")
+            suggestions.append("Try different baud rate: obd_connect(baudrate=38400) or baudrate=115200")
+        else:
+            suggestions.append("Check that OBD adapter is connected and vehicle ignition is on")
+            suggestions.append("Try manual port specification: obd_connect(port='/dev/ttyUSB0')")
+
         return OBDResponse(
             ok=False,
             errors=[ErrorInfo(
                 type=OBDErrorType.CONNECTION_FAILED.value,
-                message=status.get('error', 'Connection failed'),
-                suggestion="Check that OBD adapter is connected and vehicle ignition is on"
+                message=error_msg,
+                suggestion=" | ".join(suggestions)
             )],
             metadata=Metadata(
                 vehicle_connected=False
@@ -215,6 +237,9 @@ async def obd_disconnect() -> dict:
             metadata=Metadata(vehicle_connected=False)
         ).to_dict()
 
+    # Log that disconnect is happening (might block on ongoing queries)
+    logger.info("Disconnecting from OBD... (waiting for ongoing queries to complete)")
+
     manager.disconnect()
 
     return OBDResponse(
@@ -256,20 +281,38 @@ async def obd_status() -> dict:
         ✅ SAFE - Read-only status query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
-    status = helpers.format_status_response(manager.get_connection())
 
-    # Get vehicle metadata if connected
+    # Verify connection is actually alive with a lightweight query
+    connection = manager.get_connection()
+    actual_connected = False
+
+    if manager.is_connected() and connection:
+        try:
+            # Query STATUS to verify connection is alive
+            # This is lightweight and works on all vehicles
+            if OBD_AVAILABLE and hasattr(obd, 'commands') and hasattr(obd.commands, 'STATUS'):
+                test_response = connection.query(obd.commands.STATUS)
+                actual_connected = not test_response.is_null()
+            else:
+                # In mock mode or without obd library, trust manager
+                actual_connected = True
+        except Exception as e:
+            logger.warning(f"Connection appears stale: {e}")
+            actual_connected = False
+
+    status = helpers.format_status_response(connection)
+    status['connected'] = actual_connected  # Override with actual status
+
+    # Get vehicle metadata if actually connected
     vehicle_meta = {}
-    if manager.is_connected():
-        connection = manager.get_connection()
-        if connection:
-            vehicle_meta = helpers.get_vehicle_metadata(connection)
+    if actual_connected and connection:
+        vehicle_meta = helpers.get_vehicle_metadata(connection)
 
     return OBDResponse(
         ok=True,
         data={**status, **vehicle_meta},
         metadata=Metadata(
-            vehicle_connected=manager.is_connected(),
+            vehicle_connected=actual_connected,
             protocol=status.get('protocol'),
             port=status.get('port')
         )
@@ -342,12 +385,22 @@ async def obd_query_pid(
     result = helpers.safe_query(connection, pid_name, include_raw=include_raw)
 
     if result is None:
+        # Get supported commands for fuzzy matching
+        supported = manager.get_supported_commands()
+
+        # Find close matches (potential typos)
+        close_matches = get_close_matches(pid_name, supported, n=3, cutoff=0.6)
+
+        suggestion = "Use obd_list_supported() to see available PIDs"
+        if close_matches:
+            suggestion = f"Did you mean: {', '.join(close_matches)}? Or use obd_list_supported() to see all PIDs"
+
         return OBDResponse(
             ok=False,
             errors=[ErrorInfo(
                 type=OBDErrorType.UNSUPPORTED_COMMAND.value,
                 message=f"PID '{pid_name}' not supported or query failed",
-                suggestion="Use obd_list_supported() to see available PIDs"
+                suggestion=suggestion
             )]
         ).to_dict()
 
@@ -471,11 +524,19 @@ async def obd_list_supported() -> dict:
 
     # Group by category
     categorized = {}
+    categorized_pids = set()
+
     for category in helpers.get_all_categories():
         category_pids = helpers.get_pids_by_category(category)
         supported_in_category = [pid for pid in category_pids if pid in supported]
         if supported_in_category:
             categorized[category] = supported_in_category
+            categorized_pids.update(supported_in_category)
+
+    # Find uncategorized PIDs
+    uncategorized = [pid for pid in supported if pid not in categorized_pids]
+    if uncategorized:
+        categorized["uncategorized"] = sorted(uncategorized)
 
     status = manager.get_status()
     return OBDResponse(
@@ -483,7 +544,8 @@ async def obd_list_supported() -> dict:
         data={
             "total_count": len(supported),
             "categories": categorized,
-            "all_pids": supported
+            "all_pids": supported,
+            "uncategorized_count": len(uncategorized)
         },
         metadata=Metadata(
             vehicle_connected=True,
@@ -616,13 +678,11 @@ async def obd_get_dtcs() -> dict:
             "dtcs": [
               {
                 "code": "P0171",
-                "description": "System Too Lean (Bank 1)",
-                "mil_on": true
+                "description": "System Too Lean (Bank 1)"
               },
               {
                 "code": "P0300",
-                "description": "Random/Multiple Cylinder Misfire Detected",
-                "mil_on": true
+                "description": "Random/Multiple Cylinder Misfire Detected"
               }
             ],
             "count": 2,
@@ -635,83 +695,21 @@ async def obd_get_dtcs() -> dict:
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
+    result = dtc_tools.get_dtcs(connection, manager)
 
-    if not connection:
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.NOT_CONNECTED.value,
-                message="No OBD connection"
-            )]
-        ).to_dict()
+    # Store DTCs for safety checking before clear
+    if result.get('ok') and result.get('data'):
+        dtcs = result['data'].get('dtcs', [])
+        manager.set_last_dtcs_read(dtcs)
 
-    try:
-        # Query DTCs using Mode 03
-        if not OBD_AVAILABLE or not hasattr(obd.commands, 'GET_DTC'):
-            return OBDResponse(
-                ok=False,
-                errors=[ErrorInfo(
-                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
-                    message="GET_DTC command not available"
-                )]
-            ).to_dict()
-
-        response = connection.query(obd.commands.GET_DTC)
-
-        if response.is_null():
-            return OBDResponse(
-                ok=True,
-                data={
-                    "dtcs": [],
-                    "count": 0,
-                    "mil_on": False,
-                    "message": "No DTCs found"
-                }
-            ).to_dict()
-
-        # Format DTCs
-        dtcs = helpers.format_dtc_response(response.value)
-
-        # Get MIL status from STATUS command
-        mil_on = False
-        try:
-            status_response = connection.query(obd.commands.STATUS)
-            if not status_response.is_null() and hasattr(status_response.value, 'MIL'):
-                mil_on = status_response.value.MIL
-        except Exception as e:
-            logger.warning(f"Could not read MIL status: {e}")
-
-        status = manager.get_status()
-        return OBDResponse(
-            ok=True,
-            data={
-                "dtcs": dtcs,
-                "count": len(dtcs),
-                "mil_on": mil_on
-            },
-            metadata=Metadata(
-                vehicle_connected=True,
-                protocol=status.get('protocol'),
-                port=status.get('port')
-            )
-        ).to_dict()
-
-    except Exception as e:
-        logger.error(f"Error reading DTCs: {e}")
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNKNOWN_ERROR.value,
-                message=f"Failed to read DTCs: {str(e)}"
-            )]
-        ).to_dict()
+    return result
 
 
 @mcp.tool()
 @tool_envelope
 @connection_required
 @log_execution
-async def obd_clear_dtcs() -> dict:
+async def obd_clear_dtcs(confirm: bool = False) -> dict:
     """
     Clear all diagnostic trouble codes (DTCs).
 
@@ -738,6 +736,10 @@ async def obd_clear_dtcs() -> dict:
     ✓ You saved freeze frame data for records
     ✓ You are prepared to complete full drive cycle
 
+    Args:
+        confirm: Set to True to bypass safety check and clear without reading DTCs first.
+                 Not recommended - always read DTCs before clearing!
+
     Returns:
         Confirmation of codes cleared
 
@@ -750,61 +752,25 @@ async def obd_clear_dtcs() -> dict:
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
 
-    if not connection:
+    # Safety check: Require user to read DTCs before clearing
+    last_dtcs = manager.get_last_dtcs_read()
+    if last_dtcs is None and not confirm:
         return OBDResponse(
             ok=False,
             errors=[ErrorInfo(
-                type=OBDErrorType.NOT_CONNECTED.value,
-                message="No OBD connection"
+                type="CONFIRMATION_REQUIRED",
+                message="Safety check failed: DTCs have not been read yet.",
+                suggestion="Call obd_get_dtcs() first to see what codes you're clearing. Or pass confirm=True to bypass this safety check (NOT RECOMMENDED)."
             )]
         ).to_dict()
 
-    try:
-        # Clear DTCs using Mode 04
-        if not OBD_AVAILABLE or not hasattr(obd.commands, 'CLEAR_DTC'):
-            return OBDResponse(
-                ok=False,
-                errors=[ErrorInfo(
-                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
-                    message="CLEAR_DTC command not available"
-                )]
-            ).to_dict()
+    result = dtc_tools.clear_dtcs(connection, manager)
 
-        response = connection.query(obd.commands.CLEAR_DTC)
+    # Clear stored DTCs after successful clear
+    if result.get('ok'):
+        manager.clear_last_dtcs_read()
 
-        # Log the clear operation for accountability
-        logger.warning("DTCs CLEARED by user - All diagnostic data erased")
-
-        status = manager.get_status()
-        return OBDResponse(
-            ok=True,
-            data={
-                "message": "All DTCs cleared successfully",
-                "warning": "Readiness monitors have been reset. Vehicle may fail emission testing until monitors complete.",
-                "reminder": "Complete a full drive cycle to allow monitors to run"
-            },
-            warnings=[
-                "All diagnostic trouble codes have been erased",
-                "All freeze frame data has been erased",
-                "Readiness monitors have been reset to 'not ready'",
-                "Distance/time counters have been reset"
-            ],
-            metadata=Metadata(
-                vehicle_connected=True,
-                protocol=status.get('protocol'),
-                port=status.get('port')
-            )
-        ).to_dict()
-
-    except Exception as e:
-        logger.error(f"Error clearing DTCs: {e}")
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNKNOWN_ERROR.value,
-                message=f"Failed to clear DTCs: {str(e)}"
-            )]
-        ).to_dict()
+    return result
 
 
 @mcp.tool()
@@ -846,68 +812,7 @@ async def obd_get_pending_dtcs() -> dict:
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
-
-    if not connection:
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.NOT_CONNECTED.value,
-                message="No OBD connection"
-            )]
-        ).to_dict()
-
-    try:
-        # Get pending DTCs using Mode 07
-        # Note: python-obd may not have GET_PENDING_DTC, we'll need to use custom command
-        if OBD_AVAILABLE and hasattr(obd.commands, 'GET_CURRENT_DTC'):
-            # Some implementations use GET_CURRENT_DTC for mode 07
-            # We'll try the standard command first
-            response = connection.query(obd.commands.GET_CURRENT_DTC, force=True)
-        else:
-            return OBDResponse(
-                ok=False,
-                errors=[ErrorInfo(
-                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
-                    message="Pending DTC command not available in OBD library"
-                )]
-            ).to_dict()
-
-        if response.is_null():
-            return OBDResponse(
-                ok=True,
-                data={
-                    "pending_dtcs": [],
-                    "count": 0,
-                    "message": "No pending DTCs found"
-                }
-            ).to_dict()
-
-        # Format pending DTCs
-        pending_dtcs = helpers.format_dtc_response(response.value)
-
-        status = manager.get_status()
-        return OBDResponse(
-            ok=True,
-            data={
-                "pending_dtcs": pending_dtcs,
-                "count": len(pending_dtcs)
-            },
-            metadata=Metadata(
-                vehicle_connected=True,
-                protocol=status.get('protocol'),
-                port=status.get('port')
-            )
-        ).to_dict()
-
-    except Exception as e:
-        logger.error(f"Error reading pending DTCs: {e}")
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNKNOWN_ERROR.value,
-                message=f"Failed to read pending DTCs: {str(e)}"
-            )]
-        ).to_dict()
+    return dtc_tools.get_pending_dtcs(connection, manager)
 
 
 @mcp.tool()
@@ -950,37 +855,7 @@ async def obd_get_freeze_frame(dtc_code: Optional[str] = None) -> dict:
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
-
-    if not connection:
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.NOT_CONNECTED.value,
-                message="No OBD connection"
-            )]
-        ).to_dict()
-
-    try:
-        # Freeze frame is Mode 02
-        # For now, return a message that this requires custom implementation
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNSUPPORTED_COMMAND.value,
-                message="Freeze frame support requires custom Mode 02 implementation",
-                suggestion="This feature is planned for future implementation"
-            )]
-        ).to_dict()
-
-    except Exception as e:
-        logger.error(f"Error reading freeze frame: {e}")
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNKNOWN_ERROR.value,
-                message=f"Failed to read freeze frame: {str(e)}"
-            )]
-        ).to_dict()
+    return dtc_tools.get_freeze_frame(connection, manager, dtc_code)
 
 
 @mcp.tool()
@@ -1004,100 +879,21 @@ async def obd_get_readiness() -> dict:
           "data": {
             "mil_on": false,
             "dtc_count": 0,
-            "monitors": {
-              "continuous": {
-                "misfire": {"supported": true, "complete": true},
-                "fuel_system": {"supported": true, "complete": true},
-                "components": {"supported": true, "complete": true}
-              },
-              "non_continuous": {
-                "catalyst": {"supported": true, "complete": true},
-                "heated_catalyst": {"supported": false, "complete": false},
-                "evap": {"supported": true, "complete": false},
-                "secondary_air": {"supported": false, "complete": false},
-                "ac_refrigerant": {"supported": false, "complete": false},
-                "oxygen_sensor": {"supported": true, "complete": true},
-                "oxygen_sensor_heater": {"supported": true, "complete": true},
-                "egr": {"supported": true, "complete": true}
-              }
-            },
-            "incomplete_count": 1,
-            "emission_test_ready": true
+            "message": "Full monitor parsing not yet implemented",
+            "raw_status": "<obd.Status object ...>"
           }
         }
+
+    Note: Full monitor parsing is not yet implemented. Currently only returns
+    MIL status and DTC count. Individual monitor status (catalyst, EVAP, O2,
+    etc.) parsing will be added in a future update.
 
     Security:
         ✅ SAFE - Read-only operation, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
-
-    if not connection:
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.NOT_CONNECTED.value,
-                message="No OBD connection"
-            )]
-        ).to_dict()
-
-    try:
-        # Get readiness status using Mode 01 PID 01 (STATUS command)
-        if not OBD_AVAILABLE or not hasattr(obd.commands, 'STATUS'):
-            return OBDResponse(
-                ok=False,
-                errors=[ErrorInfo(
-                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
-                    message="STATUS command not available"
-                )]
-            ).to_dict()
-
-        response = connection.query(obd.commands.STATUS)
-
-        if response.is_null():
-            return OBDResponse(
-                ok=False,
-                errors=[ErrorInfo(
-                    type=OBDErrorType.INVALID_RESPONSE.value,
-                    message="Failed to read readiness status"
-                )]
-            ).to_dict()
-
-        # Parse status response
-        status_value = response.value
-
-        # Extract MIL and DTC count
-        mil_on = getattr(status_value, 'MIL', False)
-        dtc_count = getattr(status_value, 'DTC_count', 0)
-
-        # TODO: Parse individual monitor status from status_value
-        # This requires understanding the status bit structure
-
-        status = manager.get_status()
-        return OBDResponse(
-            ok=True,
-            data={
-                "mil_on": mil_on,
-                "dtc_count": dtc_count,
-                "message": "Full monitor parsing not yet implemented",
-                "raw_status": str(status_value)
-            },
-            metadata=Metadata(
-                vehicle_connected=True,
-                protocol=status.get('protocol'),
-                port=status.get('port')
-            )
-        ).to_dict()
-
-    except Exception as e:
-        logger.error(f"Error reading readiness status: {e}")
-        return OBDResponse(
-            ok=False,
-            errors=[ErrorInfo(
-                type=OBDErrorType.UNKNOWN_ERROR.value,
-                message=f"Failed to read readiness status: {str(e)}"
-            )]
-        ).to_dict()
+    return dtc_tools.get_readiness(connection, manager)
 
 #endregion
 
