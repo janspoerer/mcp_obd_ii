@@ -531,5 +531,514 @@ async def obd_fuel_system(include_raw: bool = False) -> dict:
 #endregion
 
 
+#region DTC (Diagnostic Trouble Code) Tools
+
+@mcp.tool()
+@tool_envelope
+@connection_required
+@log_execution
+async def obd_get_dtcs() -> dict:
+    """
+    Get current diagnostic trouble codes (DTCs).
+
+    Reads all active DTCs that have triggered the check engine light (MIL).
+    Returns code, description, and status for each DTC.
+
+    Returns:
+        List of current DTCs with metadata
+
+    Example response:
+        {
+          "ok": true,
+          "data": {
+            "dtcs": [
+              {
+                "code": "P0171",
+                "description": "System Too Lean (Bank 1)",
+                "mil_on": true
+              },
+              {
+                "code": "P0300",
+                "description": "Random/Multiple Cylinder Misfire Detected",
+                "mil_on": true
+              }
+            ],
+            "count": 2,
+            "mil_on": true
+          }
+        }
+
+    Security:
+        ✅ SAFE - Read-only operation, no risk to vehicle or data
+    """
+    manager = OBDConnectionManager.get_instance()
+    connection = manager.get_connection()
+
+    if not connection:
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.NOT_CONNECTED.value,
+                message="No OBD connection"
+            )]
+        ).to_dict()
+
+    try:
+        # Query DTCs using Mode 03
+        if not OBD_AVAILABLE or not hasattr(obd.commands, 'GET_DTC'):
+            return OBDResponse(
+                ok=False,
+                errors=[ErrorInfo(
+                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
+                    message="GET_DTC command not available"
+                )]
+            ).to_dict()
+
+        response = connection.query(obd.commands.GET_DTC)
+
+        if response.is_null():
+            return OBDResponse(
+                ok=True,
+                data={
+                    "dtcs": [],
+                    "count": 0,
+                    "mil_on": False,
+                    "message": "No DTCs found"
+                }
+            ).to_dict()
+
+        # Format DTCs
+        dtcs = helpers.format_dtc_response(response.value)
+
+        # Get MIL status from STATUS command
+        mil_on = False
+        try:
+            status_response = connection.query(obd.commands.STATUS)
+            if not status_response.is_null() and hasattr(status_response.value, 'MIL'):
+                mil_on = status_response.value.MIL
+        except Exception as e:
+            logger.warning(f"Could not read MIL status: {e}")
+
+        status = manager.get_status()
+        return OBDResponse(
+            ok=True,
+            data={
+                "dtcs": dtcs,
+                "count": len(dtcs),
+                "mil_on": mil_on
+            },
+            metadata=Metadata(
+                vehicle_connected=True,
+                protocol=status.get('protocol'),
+                port=status.get('port')
+            )
+        ).to_dict()
+
+    except Exception as e:
+        logger.error(f"Error reading DTCs: {e}")
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNKNOWN_ERROR.value,
+                message=f"Failed to read DTCs: {str(e)}"
+            )]
+        ).to_dict()
+
+
+@mcp.tool()
+@tool_envelope
+@connection_required
+@log_execution
+async def obd_clear_dtcs() -> dict:
+    """
+    Clear all diagnostic trouble codes (DTCs).
+
+    ⚠️  WARNING: DESTRUCTIVE OPERATION ⚠️
+
+    This command will PERMANENTLY:
+    - Erase ALL diagnostic trouble codes
+    - Erase ALL freeze frame data
+    - Reset ALL readiness monitors to "not ready"
+    - Turn off check engine light (MIL)
+    - Reset distance/time counters
+
+    CRITICAL WARNINGS:
+    ✗ Clearing codes does NOT fix the underlying problem
+    ✗ Vehicle will FAIL emission testing until monitors complete
+    ✗ Unrepaired misfires can destroy catalytic converter ($1,000-2,500)
+    ✗ Hiding problems before sale/trade = FRAUD
+    ✗ Clearing codes for emission testing = ILLEGAL in most jurisdictions
+    ✗ May void manufacturer warranty
+
+    ONLY clear codes if:
+    ✓ You have completed repairs
+    ✓ You verified the problem is actually fixed
+    ✓ You saved freeze frame data for records
+    ✓ You are prepared to complete full drive cycle
+
+    Returns:
+        Confirmation of codes cleared
+
+    Security:
+        ⚠️ MEDIUM RISK - Destructive write operation. Permanently erases DTCs
+        and freeze frames. Can hide problems leading to expensive damage. May
+        constitute fraud if used to pass emissions testing. Requires explicit
+        warnings and user confirmation.
+    """
+    manager = OBDConnectionManager.get_instance()
+    connection = manager.get_connection()
+
+    if not connection:
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.NOT_CONNECTED.value,
+                message="No OBD connection"
+            )]
+        ).to_dict()
+
+    try:
+        # Clear DTCs using Mode 04
+        if not OBD_AVAILABLE or not hasattr(obd.commands, 'CLEAR_DTC'):
+            return OBDResponse(
+                ok=False,
+                errors=[ErrorInfo(
+                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
+                    message="CLEAR_DTC command not available"
+                )]
+            ).to_dict()
+
+        response = connection.query(obd.commands.CLEAR_DTC)
+
+        # Log the clear operation for accountability
+        logger.warning("DTCs CLEARED by user - All diagnostic data erased")
+
+        status = manager.get_status()
+        return OBDResponse(
+            ok=True,
+            data={
+                "message": "All DTCs cleared successfully",
+                "warning": "Readiness monitors have been reset. Vehicle may fail emission testing until monitors complete.",
+                "reminder": "Complete a full drive cycle to allow monitors to run"
+            },
+            warnings=[
+                "All diagnostic trouble codes have been erased",
+                "All freeze frame data has been erased",
+                "Readiness monitors have been reset to 'not ready'",
+                "Distance/time counters have been reset"
+            ],
+            metadata=Metadata(
+                vehicle_connected=True,
+                protocol=status.get('protocol'),
+                port=status.get('port')
+            )
+        ).to_dict()
+
+    except Exception as e:
+        logger.error(f"Error clearing DTCs: {e}")
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNKNOWN_ERROR.value,
+                message=f"Failed to clear DTCs: {str(e)}"
+            )]
+        ).to_dict()
+
+
+@mcp.tool()
+@tool_envelope
+@connection_required
+@log_execution
+async def obd_get_pending_dtcs() -> dict:
+    """
+    Get pending diagnostic trouble codes (DTCs).
+
+    Pending codes are detected faults that have not yet been confirmed.
+    They haven't lit the check engine light yet, but indicate potential
+    problems that may mature into confirmed DTCs.
+
+    Useful for:
+    - Catching intermittent problems early
+    - Predicting upcoming failures
+    - Verifying repairs before codes confirm
+
+    Returns:
+        List of pending DTCs
+
+    Example response:
+        {
+          "ok": true,
+          "data": {
+            "pending_dtcs": [
+              {
+                "code": "P0420",
+                "description": "Catalyst System Efficiency Below Threshold (Bank 1)"
+              }
+            ],
+            "count": 1
+          }
+        }
+
+    Security:
+        ✅ SAFE - Read-only operation, no risk to vehicle or data
+    """
+    manager = OBDConnectionManager.get_instance()
+    connection = manager.get_connection()
+
+    if not connection:
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.NOT_CONNECTED.value,
+                message="No OBD connection"
+            )]
+        ).to_dict()
+
+    try:
+        # Get pending DTCs using Mode 07
+        # Note: python-obd may not have GET_PENDING_DTC, we'll need to use custom command
+        if OBD_AVAILABLE and hasattr(obd.commands, 'GET_CURRENT_DTC'):
+            # Some implementations use GET_CURRENT_DTC for mode 07
+            # We'll try the standard command first
+            response = connection.query(obd.commands.GET_CURRENT_DTC, force=True)
+        else:
+            return OBDResponse(
+                ok=False,
+                errors=[ErrorInfo(
+                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
+                    message="Pending DTC command not available in OBD library"
+                )]
+            ).to_dict()
+
+        if response.is_null():
+            return OBDResponse(
+                ok=True,
+                data={
+                    "pending_dtcs": [],
+                    "count": 0,
+                    "message": "No pending DTCs found"
+                }
+            ).to_dict()
+
+        # Format pending DTCs
+        pending_dtcs = helpers.format_dtc_response(response.value)
+
+        status = manager.get_status()
+        return OBDResponse(
+            ok=True,
+            data={
+                "pending_dtcs": pending_dtcs,
+                "count": len(pending_dtcs)
+            },
+            metadata=Metadata(
+                vehicle_connected=True,
+                protocol=status.get('protocol'),
+                port=status.get('port')
+            )
+        ).to_dict()
+
+    except Exception as e:
+        logger.error(f"Error reading pending DTCs: {e}")
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNKNOWN_ERROR.value,
+                message=f"Failed to read pending DTCs: {str(e)}"
+            )]
+        ).to_dict()
+
+
+@mcp.tool()
+@tool_envelope
+@connection_required
+@log_execution
+async def obd_get_freeze_frame(dtc_code: Optional[str] = None) -> dict:
+    """
+    Get freeze frame data for a specific DTC.
+
+    Freeze frame is a snapshot of sensor values at the moment a DTC was triggered.
+    Critical for diagnosing intermittent problems - shows exact conditions when
+    the fault occurred.
+
+    Args:
+        dtc_code: Optional DTC code (e.g., "P0171"). If not provided, returns
+                  freeze frame for the first/primary DTC.
+
+    Returns:
+        Freeze frame sensor data
+
+    Example response:
+        {
+          "ok": true,
+          "data": {
+            "dtc": "P0171",
+            "freeze_frame": {
+              "RPM": {"value": 2800, "unit": "rpm"},
+              "SPEED": {"value": 65, "unit": "kph"},
+              "COOLANT_TEMP": {"value": 195, "unit": "fahrenheit"},
+              "ENGINE_LOAD": {"value": 45, "unit": "percent"},
+              "THROTTLE_POS": {"value": 28, "unit": "percent"},
+              "SHORT_FUEL_TRIM_1": {"value": 25, "unit": "percent"}
+            }
+          }
+        }
+
+    Security:
+        ✅ SAFE - Read-only operation, no risk to vehicle or data
+    """
+    manager = OBDConnectionManager.get_instance()
+    connection = manager.get_connection()
+
+    if not connection:
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.NOT_CONNECTED.value,
+                message="No OBD connection"
+            )]
+        ).to_dict()
+
+    try:
+        # Freeze frame is Mode 02
+        # For now, return a message that this requires custom implementation
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNSUPPORTED_COMMAND.value,
+                message="Freeze frame support requires custom Mode 02 implementation",
+                suggestion="This feature is planned for future implementation"
+            )]
+        ).to_dict()
+
+    except Exception as e:
+        logger.error(f"Error reading freeze frame: {e}")
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNKNOWN_ERROR.value,
+                message=f"Failed to read freeze frame: {str(e)}"
+            )]
+        ).to_dict()
+
+
+@mcp.tool()
+@tool_envelope
+@connection_required
+@log_execution
+async def obd_get_readiness() -> dict:
+    """
+    Get emission readiness monitor status.
+
+    Shows which OBD monitors have completed their self-diagnostic tests.
+    Essential for emission testing compliance - most states require all
+    monitors to be "ready" (except 1-2 allowed incomplete).
+
+    Returns:
+        Monitor completion status for all supported monitors
+
+    Example response:
+        {
+          "ok": true,
+          "data": {
+            "mil_on": false,
+            "dtc_count": 0,
+            "monitors": {
+              "continuous": {
+                "misfire": {"supported": true, "complete": true},
+                "fuel_system": {"supported": true, "complete": true},
+                "components": {"supported": true, "complete": true}
+              },
+              "non_continuous": {
+                "catalyst": {"supported": true, "complete": true},
+                "heated_catalyst": {"supported": false, "complete": false},
+                "evap": {"supported": true, "complete": false},
+                "secondary_air": {"supported": false, "complete": false},
+                "ac_refrigerant": {"supported": false, "complete": false},
+                "oxygen_sensor": {"supported": true, "complete": true},
+                "oxygen_sensor_heater": {"supported": true, "complete": true},
+                "egr": {"supported": true, "complete": true}
+              }
+            },
+            "incomplete_count": 1,
+            "emission_test_ready": true
+          }
+        }
+
+    Security:
+        ✅ SAFE - Read-only operation, no risk to vehicle or data
+    """
+    manager = OBDConnectionManager.get_instance()
+    connection = manager.get_connection()
+
+    if not connection:
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.NOT_CONNECTED.value,
+                message="No OBD connection"
+            )]
+        ).to_dict()
+
+    try:
+        # Get readiness status using Mode 01 PID 01 (STATUS command)
+        if not OBD_AVAILABLE or not hasattr(obd.commands, 'STATUS'):
+            return OBDResponse(
+                ok=False,
+                errors=[ErrorInfo(
+                    type=OBDErrorType.UNSUPPORTED_COMMAND.value,
+                    message="STATUS command not available"
+                )]
+            ).to_dict()
+
+        response = connection.query(obd.commands.STATUS)
+
+        if response.is_null():
+            return OBDResponse(
+                ok=False,
+                errors=[ErrorInfo(
+                    type=OBDErrorType.INVALID_RESPONSE.value,
+                    message="Failed to read readiness status"
+                )]
+            ).to_dict()
+
+        # Parse status response
+        status_value = response.value
+
+        # Extract MIL and DTC count
+        mil_on = getattr(status_value, 'MIL', False)
+        dtc_count = getattr(status_value, 'DTC_count', 0)
+
+        # TODO: Parse individual monitor status from status_value
+        # This requires understanding the status bit structure
+
+        status = manager.get_status()
+        return OBDResponse(
+            ok=True,
+            data={
+                "mil_on": mil_on,
+                "dtc_count": dtc_count,
+                "message": "Full monitor parsing not yet implemented",
+                "raw_status": str(status_value)
+            },
+            metadata=Metadata(
+                vehicle_connected=True,
+                protocol=status.get('protocol'),
+                port=status.get('port')
+            )
+        ).to_dict()
+
+    except Exception as e:
+        logger.error(f"Error reading readiness status: {e}")
+        return OBDResponse(
+            ok=False,
+            errors=[ErrorInfo(
+                type=OBDErrorType.UNKNOWN_ERROR.value,
+                message=f"Failed to read readiness status: {str(e)}"
+            )]
+        ).to_dict()
+
+#endregion
+
+
 if __name__ == "__main__":
     mcp.run()
