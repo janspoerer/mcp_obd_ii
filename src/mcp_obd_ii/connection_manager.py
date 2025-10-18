@@ -129,6 +129,7 @@ class OBDConnectionManager:
         self._config: ConnectionConfig = ConnectionConfig()
         self._error_message: Optional[str] = None
         self._mock_mode: bool = os.getenv("MOCK_OBD", "false").lower() == "true"
+        self._last_dtcs_read: Optional[List[Dict[str, str]]] = None  # Track last DTCs for safety
 
         if not OBD_AVAILABLE:
             logger.warning("obd library not available, enabling mock mode automatically")
@@ -330,3 +331,28 @@ class OBDConnectionManager:
             except Exception as e:
                 logger.error(f"Error querying command {command}: {e}")
                 return None
+
+    def set_last_dtcs_read(self, dtcs: List[Dict[str, str]]) -> None:
+        """
+        Store the last DTCs that were read (for safety checking).
+
+        Args:
+            dtcs: List of DTC dictionaries with 'code' and 'description'
+        """
+        with self._lock:
+            self._last_dtcs_read = dtcs
+
+    def get_last_dtcs_read(self) -> Optional[List[Dict[str, str]]]:
+        """
+        Get the last DTCs that were read.
+
+        Returns:
+            List of DTC dictionaries or None if DTCs haven't been read yet
+        """
+        with self._lock:
+            return self._last_dtcs_read
+
+    def clear_last_dtcs_read(self) -> None:
+        """Clear the stored DTCs (call after clearing DTCs on vehicle)."""
+        with self._lock:
+            self._last_dtcs_read = None
