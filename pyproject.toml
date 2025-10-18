@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-obd-ii"
+version = "0.1.0"
+description = "Model Context Protocol server for OBD-II vehicle diagnostics"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "MCP OBD-II Contributors"}
+]
+license = {text = "MIT"}
+dependencies = [
+    "mcp>=0.9.0",
+    "pyserial>=3.5",
+    "obd>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+mcp-obd-ii = "mcp_obd_ii.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mcp_obd_ii = ["py.typed"]
