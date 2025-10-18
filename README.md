@@ -43,20 +43,26 @@ pip install -r requirements.txt
 
 And then enable your AI agent (such as Claude Code) to use the MCP by putting a `.mcp.json` file into the folder where you are executing the agent from:
 
-```
+```json
 {
     "mcpServers": {
         "mcp_obd_ii": {
             "type": "stdio",
-            "command": "/Users/janspoerer/code/miscellaneous/obd_ii/mcp_obd_ii/.venv/bin/python",
+            "command": "/path/to/your/mcp_obd_ii/.venv/bin/python",
             "args": ["-m", "mcp_obd_ii"],
             "env": {
-                "PYTHONPATH": "/Users/janspoerer/code/miscellaneous/obd_ii/mcp_obd_ii/src"
+                "PYTHONPATH": "/path/to/your/mcp_obd_ii/src"
             }
         }
     }
 }
+```
 
+Replace `/path/to/your/mcp_obd_ii` with the actual path to your installation.
+
+Start Claude Code with this MCP server:
+```bash
+claude --strict-mcp-config --mcp-config /path/to/your/.mcp.json
 ```
 
 ## Available Tools
@@ -77,6 +83,14 @@ And then enable your AI agent (such as Claude Code) to use the MCP by putting a 
 
 - `obd_engine_data` - Get all engine-related data
 - `obd_fuel_system` - Get all fuel system data
+
+### Diagnostic Trouble Codes (DTCs)
+
+- `obd_get_dtcs` - Get current diagnostic trouble codes
+- `obd_clear_dtcs` - Clear all DTCs (⚠️ WARNING: Destructive operation)
+- `obd_get_pending_dtcs` - Get pending (not yet confirmed) DTCs
+- `obd_get_freeze_frame` - Get freeze frame data for a DTC
+- `obd_get_readiness` - Get emission readiness monitor status
 
 ## Architecture
 
