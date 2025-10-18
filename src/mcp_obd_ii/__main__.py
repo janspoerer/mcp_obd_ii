@@ -71,6 +71,9 @@ async def obd_connect(
 
         Full manual configuration:
             obd_connect(port="COM3", baudrate=38400, protocol="6")
+
+    Security:
+        ✅ SAFE - Connection establishment only, no data modification
     """
     manager = OBDConnectionManager.get_instance()
 
@@ -137,6 +140,9 @@ async def obd_disconnect() -> dict:
 
     Returns:
         Disconnection confirmation
+
+    Security:
+        ✅ SAFE - Connection teardown only, no data modification
     """
     manager = OBDConnectionManager.get_instance()
 
@@ -183,6 +189,9 @@ async def obd_status() -> dict:
             "ecu_name": "ECM-Engine Control"
           }
         }
+
+    Security:
+        ✅ SAFE - Read-only status query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     status = helpers.format_status_response(manager.get_connection())
@@ -251,6 +260,9 @@ async def obd_query_pid(
             "timestamp": "2025-10-18T14:30:45.123Z"
           }
         }
+
+    Security:
+        ✅ SAFE - Read-only PID query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
@@ -325,6 +337,9 @@ async def obd_query_multiple(
             "count": 3
           }
         }
+
+    Security:
+        ✅ SAFE - Read-only batch PID query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
@@ -385,6 +400,9 @@ async def obd_list_supported() -> dict:
             "all_pids": ["RPM", "SPEED", "COOLANT_TEMP", ...]
           }
         }
+
+    Security:
+        ✅ SAFE - Read-only command enumeration, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     supported = manager.get_supported_commands()
@@ -444,6 +462,9 @@ async def obd_engine_data(include_raw: bool = False) -> dict:
         - INTAKE_PRESSURE: Manifold pressure
         - MAF: Mass air flow
         - RUN_TIME: Time since engine start
+
+    Security:
+        ✅ SAFE - Read-only category query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
@@ -487,6 +508,9 @@ async def obd_fuel_system(include_raw: bool = False) -> dict:
         - LONG_FUEL_TRIM_1/2: Long-term fuel trim
         - FUEL_TYPE: Fuel type (gasoline, diesel, etc.)
         - ETHANOL_PERCENT: Ethanol percentage in fuel
+
+    Security:
+        ✅ SAFE - Read-only category query, no risk to vehicle or data
     """
     manager = OBDConnectionManager.get_instance()
     connection = manager.get_connection()
